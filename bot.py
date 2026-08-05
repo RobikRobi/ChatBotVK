@@ -400,10 +400,27 @@ def run():
         raise RuntimeError("Не найден VK_TOKEN. Укажите токен в переменной окружения или первой строкой в key.txt.")
     if not VK_GROUP_ID:
         raise RuntimeError("Не найден VK_GROUP_ID. Укажите ID группы в переменной окружения или второй строкой в key.txt.")
-    if not SCHEDULE_FILE.exists():
-        raise RuntimeError(f"Не найден файл расписания: {SCHEDULE_FILE}")
 
-    schedule = load_schedule(SCHEDULE_FILE)
+    # Определяем источник расписания: Google Таблица или xlsx файл
+    schedule = None
+    if GOOGLE_SPREADSHEET_ID:
+        print(f"Загрузка расписания из Google Таблицы (ID: {GOOGLE_SPREADSHEET_ID})...")
+        from config import GOOGLE_CREDENTIALS_FILE
+        credentials_path = Path(GOOGLE_CREDENTIALS_FILE) if Path(GOOGLE_CREDENTIALS_FILE).is_absolute() else BASE_DIR / GOOGLE_CREDENTIALS_FILE
+        try:
+            from schedule_reader import load_schedule_from_google
+            schedule = load_schedule_from_google(credentials_path, GOOGLE_SPREADSHEET_ID)
+            print("Расписание успешно загружено из Google Таблицы.")
+        except Exception as e:
+            print(f"Ошибка загрузки из Google Таблицы: {e}")
+            print("Попробуем загрузить из локального файла...")
+    
+    # Если не удалось загрузить из Google или ID не указан, используем локальный файл
+    if schedule is None:
+        if not SCHEDULE_FILE.exists():
+            raise RuntimeError(f"Не найден файл расписания: {SCHEDULE_FILE}")
+        print(f"Загрузка расписания из файла: {SCHEDULE_FILE}")
+        schedule = load_schedule(SCHEDULE_FILE)
     storage = JsonStorage(USERS_FILE)
 
     vk_session = vk_api.VkApi(token=VK_TOKEN)

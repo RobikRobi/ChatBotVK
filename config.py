@@ -37,6 +37,8 @@ _file_values = _read_key_file()
 
 VK_TOKEN = os.getenv("VK_TOKEN") or _file_values.get("VK_TOKEN")
 VK_GROUP_ID = os.getenv("VK_GROUP_ID") or _file_values.get("VK_GROUP_ID")
+GOOGLE_SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID") or _file_values.get("GOOGLE_SPREADSHEET_ID")
+GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE") or _file_values.get("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 
 if VK_GROUP_ID:
     group_id_text = str(VK_GROUP_ID).strip()
