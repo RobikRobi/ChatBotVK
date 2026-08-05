@@ -78,7 +78,8 @@ def class_keyboard(classes):
 def main_keyboard():
     return make_keyboard(
         [
-            [("Расписание", VkKeyboardColor.POSITIVE), ("Мой профиль", VkKeyboardColor.PRIMARY)],
+            [("Расписание", VkKeyboardColor.POSITIVE), ("Расписание на неделю", VkKeyboardColor.PRIMARY)],
+            [("Мой профиль", VkKeyboardColor.PRIMARY)],
             [("Начать заново", VkKeyboardColor.NEGATIVE)],
         ]
     )
@@ -210,13 +211,43 @@ def format_schedule(title, lessons, show_class=True):
     return "\n".join(lines)
 
 
-def schedule_text(profile, schedule):
+def format_weekly_schedule(title, lessons, show_class=True):
+    """Форматирует расписание на неделю с группировкой по дням."""
+    if not lessons:
+        return f"{title}\n\nРасписание не найдено."
+
+    days_order = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+    lessons_by_day = {}
+    for lesson in lessons:
+        lessons_by_day.setdefault(lesson.day, []).append(lesson)
+
+    lines = [title]
+    for day in days_order:
+        day_lessons = lessons_by_day.get(day, [])
+        if not day_lessons:
+            continue
+        lines.append("")
+        lines.append(f"📅 {day}")
+        for lesson in sorted(day_lessons, key=lambda x: x.time):
+            class_prefix = f"{lesson.class_name}: " if show_class and lesson.class_name else ""
+            subject_text = lesson.subject or '-'
+            lines.append(f"  {lesson.time} - {class_prefix}{subject_text}")
+
+    if len(lines) == 1:
+        lines.append("\nРасписание не найдено.")
+
+    return "\n".join(lines)
+
+
+def schedule_text(profile, schedule, weekly=False):
     role = profile.get("role")
     if role in ("student", "parent"):
         class_name = profile.get("class_name")
         if not class_name:
             return "Сначала выберите класс через «Начать заново»."
         lessons = schedule.lessons_for_class(class_name)
+        if weekly:
+            return format_weekly_schedule(f"Расписание для {class_name}", lessons, show_class=False)
         return format_schedule(f"Расписание для {class_name}", lessons, show_class=False)
 
     if role == "teacher":
@@ -225,17 +256,26 @@ def schedule_text(profile, schedule):
         if not subjects or not classes:
             return "Сначала выберите предметы и классы через «Начать заново»."
         lessons = schedule.lessons_for_teacher(subjects, classes)
+        if weekly:
+            return format_weekly_schedule("Ваши уроки на неделю", lessons)
         return format_schedule("Ваши уроки", lessons)
 
     return "Сначала выберите роль через «Начать заново»."
 
 
 def send_profile_ready(vk, peer_id, profile, schedule):
+    role = profile.get("role")
+    if role == "teacher":
+        hint_text = (
+            "Нажмите «Расписание», чтобы получить уроки на сегодня,\n"
+            "или «Расписание на неделю», чтобы увидеть все уроки."
+        )
+    else:
+        hint_text = "Нажмите «Расписание», чтобы получить уроки."
     send(
         vk,
         peer_id,
-        f"Готово, сохранил профиль.\n\n{profile_text(profile)}\n\n"
-        "Нажмите «Расписание», чтобы получить уроки.",
+        f"Готово, сохранил профиль.\n\n{profile_text(profile)}\n\n{hint_text}",
         main_keyboard(),
     )
 
@@ -256,6 +296,10 @@ def handle_message(vk, storage, schedule, user_id, peer_id, text):
 
     if text_lower in ("расписание", "моё расписание", "мое расписание"):
         send_long(vk, peer_id, schedule_text(user.get("profile", {}), schedule), main_keyboard())
+        return
+
+    if text_lower in ("расписание на неделю", "недельное расписание", "расписание недели"):
+        send_long(vk, peer_id, schedule_text(user.get("profile", {}), schedule, weekly=True), main_keyboard())
         return
 
     if text_lower == "назад":
@@ -356,10 +400,27 @@ def run():
         raise RuntimeError("Не найден VK_TOKEN. Укажите токен в переменной окружения или первой строкой в key.txt.")
     if not VK_GROUP_ID:
         raise RuntimeError("Не найден VK_GROUP_ID. Укажите ID группы в переменной окружения или второй строкой в key.txt.")
-    if not SCHEDULE_FILE.exists():
-        raise RuntimeError(f"Не найден файл расписания: {SCHEDULE_FILE}")
 
-    schedule = load_schedule(SCHEDULE_FILE)
+    # Определяем источник расписания: Google Таблица или xlsx файл
+    schedule = None
+    if GOOGLE_SPREADSHEET_ID:
+        print(f"Загрузка расписания из Google Таблицы (ID: {GOOGLE_SPREADSHEET_ID})...")
+        from config import GOOGLE_CREDENTIALS_FILE
+        credentials_path = Path(GOOGLE_CREDENTIALS_FILE) if Path(GOOGLE_CREDENTIALS_FILE).is_absolute() else BASE_DIR / GOOGLE_CREDENTIALS_FILE
+        try:
+            from schedule_reader import load_schedule_from_google
+            schedule = load_schedule_from_google(credentials_path, GOOGLE_SPREADSHEET_ID)
+            print("Расписание успешно загружено из Google Таблицы.")
+        except Exception as e:
+            print(f"Ошибка загрузки из Google Таблицы: {e}")
+            print("Попробуем загрузить из локального файла...")
+    
+    # Если не удалось загрузить из Google или ID не указан, используем локальный файл
+    if schedule is None:
+        if not SCHEDULE_FILE.exists():
+            raise RuntimeError(f"Не найден файл расписания: {SCHEDULE_FILE}")
+        print(f"Загрузка расписания из файла: {SCHEDULE_FILE}")
+        schedule = load_schedule(SCHEDULE_FILE)
     storage = JsonStorage(USERS_FILE)
 
     vk_session = vk_api.VkApi(token=VK_TOKEN)
