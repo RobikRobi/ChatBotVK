@@ -6,3 +6,4 @@ data/
 tmp/
 *.pyc
 key.txt
+.env

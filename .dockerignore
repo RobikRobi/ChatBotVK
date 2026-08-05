@@ -1,0 +1,15 @@
+.git/
+.agents/
+.codex/
+__pycache__/
+*.pyc
+.venv/
+venv/
+node_modules/
+data/
+tmp/
+key.txt
+.env
+server.txt
+outputs/soo_pdf_conversion/*.png
+outputs/soo_pdf_conversion/*.ndjson

@@ -1,13 +1,20 @@
 import random
 import sys
 
-import vk_api
-from vk_api.bot_longpoll import VkBotEventType, VkBotLongPoll
-from vk_api.keyboard import VkKeyboard, VkKeyboardColor
-
 from config import SCHEDULE_FILE, USERS_FILE, VK_GROUP_ID, VK_TOKEN
 from schedule_reader import load_schedule
 from storage import JsonStorage
+
+try:
+    import vk_api
+    from vk_api.bot_longpoll import VkBotEventType, VkBotLongPoll
+    from vk_api.keyboard import VkKeyboard, VkKeyboardColor
+except ModuleNotFoundError:
+    vk_api = None
+    VkBotEventType = None
+    VkBotLongPoll = None
+    VkKeyboard = None
+    VkKeyboardColor = None
 
 
 ROLE_LABELS = {
@@ -18,6 +25,8 @@ ROLE_LABELS = {
 
 
 def make_keyboard(rows, one_time=False):
+    if VkKeyboard is None:
+        return None
     keyboard = VkKeyboard(one_time=one_time)
     for row_index, row in enumerate(rows):
         if row_index:
@@ -69,7 +78,7 @@ def class_keyboard(classes):
 def main_keyboard():
     return make_keyboard(
         [
-            [("Мой профиль", VkKeyboardColor.PRIMARY)],
+            [("Расписание", VkKeyboardColor.POSITIVE), ("Мой профиль", VkKeyboardColor.PRIMARY)],
             [("Начать заново", VkKeyboardColor.NEGATIVE)],
         ]
     )
@@ -84,6 +93,24 @@ def send(vk, peer_id, text, keyboard=None):
     if keyboard:
         params["keyboard"] = keyboard
     vk.messages.send(**params)
+
+
+def send_long(vk, peer_id, text, keyboard=None, limit=3500):
+    parts = []
+    current = ""
+    for line in text.splitlines():
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit:
+            if current:
+                parts.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        parts.append(current)
+
+    for index, part in enumerate(parts):
+        send(vk, peer_id, part, keyboard if index == len(parts) - 1 else None)
 
 
 def parse_role(text):
@@ -167,20 +194,71 @@ def profile_text(profile):
     return "Профиль пока не заполнен."
 
 
-def handle_message(vk, storage, schedule, user_id, peer_id, text):
-    text = text.strip()
-    user = storage.get_user(user_id)
+def format_schedule(title, lessons, show_class=True):
+    if not lessons:
+        return f"{title}\n\nРасписание не найдено."
 
-    if not text or text.lower() in ("/start", "start", "начать", "начать заново"):
-        user = storage.reset_user(user_id)
+    lines = [title]
+    current_day = None
+    for lesson in lessons:
+        if lesson.day != current_day:
+            current_day = lesson.day
+            lines.append("")
+            lines.append(current_day)
+        class_prefix = f"{lesson.class_name}: " if show_class and lesson.class_name else ""
+        lines.append(f"{lesson.time} - {class_prefix}{lesson.subject or '-'}")
+    return "\n".join(lines)
+
+
+def schedule_text(profile, schedule):
+    role = profile.get("role")
+    if role in ("student", "parent"):
+        class_name = profile.get("class_name")
+        if not class_name:
+            return "Сначала выберите класс через «Начать заново»."
+        lessons = schedule.lessons_for_class(class_name)
+        return format_schedule(f"Расписание для {class_name}", lessons, show_class=False)
+
+    if role == "teacher":
+        subjects = profile.get("subjects", [])
+        classes = profile.get("classes", [])
+        if not subjects or not classes:
+            return "Сначала выберите предметы и классы через «Начать заново»."
+        lessons = schedule.lessons_for_teacher(subjects, classes)
+        return format_schedule("Ваши уроки", lessons)
+
+    return "Сначала выберите роль через «Начать заново»."
+
+
+def send_profile_ready(vk, peer_id, profile, schedule):
+    send(
+        vk,
+        peer_id,
+        f"Готово, сохранил профиль.\n\n{profile_text(profile)}\n\n"
+        "Нажмите «Расписание», чтобы получить уроки.",
+        main_keyboard(),
+    )
+
+
+def handle_message(vk, storage, schedule, user_id, peer_id, text):
+    text = (text or "").strip()
+    user = storage.get_user(user_id)
+    text_lower = text.lower()
+
+    if not text or text_lower in ("/start", "start", "начать", "начать заново"):
+        storage.reset_user(user_id)
         ask_role(vk, peer_id)
         return
 
-    if text.lower() == "мой профиль":
+    if text_lower == "мой профиль":
         send(vk, peer_id, profile_text(user.get("profile", {})), main_keyboard())
         return
 
-    if text.lower() == "назад":
+    if text_lower in ("расписание", "моё расписание", "мое расписание"):
+        send_long(vk, peer_id, schedule_text(user.get("profile", {}), schedule), main_keyboard())
+        return
+
+    if text_lower == "назад":
         role = user.get("profile", {}).get("role")
         if role in ("student", "parent"):
             user["step"] = "grade"
@@ -227,7 +305,7 @@ def handle_message(vk, storage, schedule, user_id, peer_id, text):
     if step == "class_letter":
         grade = profile.get("grade")
         options = schedule.grades.get(grade, [])
-        normalized = text.lower().replace(" ", "")
+        normalized = text_lower.replace(" ", "")
         selected = next((name for name in options if name.lower() == normalized), None)
         if not selected and grade:
             selected = next((name for name in options if name.lower().replace(grade, "") == normalized), None)
@@ -237,7 +315,7 @@ def handle_message(vk, storage, schedule, user_id, peer_id, text):
         profile["class_name"] = selected
         user["step"] = "done"
         storage.update_user(user_id, user)
-        send(vk, peer_id, f"Готово, сохранил профиль.\n\n{profile_text(profile)}", main_keyboard())
+        send_profile_ready(vk, peer_id, profile, schedule)
         return
 
     if step == "teacher_subjects":
@@ -259,10 +337,10 @@ def handle_message(vk, storage, schedule, user_id, peer_id, text):
         profile["classes"] = [schedule.classes[number - 1] for number in numbers]
         user["step"] = "done"
         storage.update_user(user_id, user)
-        send(vk, peer_id, f"Готово, сохранил профиль.\n\n{profile_text(profile)}", main_keyboard())
+        send_profile_ready(vk, peer_id, profile, schedule)
         return
 
-    send(vk, peer_id, "Профиль уже настроен.", main_keyboard())
+    send(vk, peer_id, "Нажмите «Расписание», чтобы получить уроки.", main_keyboard())
 
 
 def get_message(event):
@@ -272,6 +350,8 @@ def get_message(event):
 
 
 def run():
+    if vk_api is None:
+        raise RuntimeError("Не установлен пакет vk_api. Выполните: pip install -r requirements.txt")
     if not VK_TOKEN:
         raise RuntimeError("Не найден VK_TOKEN. Укажите токен в переменной окружения или первой строкой в key.txt.")
     if not VK_GROUP_ID:
