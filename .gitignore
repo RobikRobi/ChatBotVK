@@ -1,9 +1,1 @@
-__pycache__/
-.venv/
-venv/
-node_modules/
-data/
-tmp/
-*.pyc
-key.txt
-.env
+Nothing should be ignored based on the provided file changes. The only modified file is 'bot.py', which is a source code file and should not be added to .gitignore.
