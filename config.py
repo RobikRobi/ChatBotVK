@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parent
-KEY_FILE = BASE_DIR / "key.txt"
+KEY_FILE = BASE_DIR / ".env"
 SCHEDULE_FILE = BASE_DIR / "outputs" / "soo_pdf_conversion" / "soo_schedule.xlsx"
 DATA_DIR = BASE_DIR / "data"
 USERS_FILE = DATA_DIR / "users.json"
