@@ -1,6 +1,7 @@
 import random
 import sys
 
+from bot_core import KEYBOARD_CLASS, KEYBOARD_GRADE, KEYBOARD_MAIN, KEYBOARD_ROLE, handle_message
 from config import SCHEDULE_FILE, USERS_FILE, VK_GROUP_ID, VK_TOKEN
 from schedule_reader import load_schedule
 from storage import JsonStorage
@@ -17,13 +18,6 @@ except ModuleNotFoundError:
     VkKeyboardColor = None
 
 
-ROLE_LABELS = {
-    "student": "Ученик",
-    "parent": "Родитель",
-    "teacher": "Учитель",
-}
-
-
 def make_keyboard(rows, one_time=False):
     if VkKeyboard is None:
         return None
@@ -36,7 +30,7 @@ def make_keyboard(rows, one_time=False):
     return keyboard.get_keyboard()
 
 
-def role_keyboard():
+def role_keyboard(_options):
     return make_keyboard(
         [[
             ("Ученик", VkKeyboardColor.PRIMARY),
@@ -75,13 +69,30 @@ def class_keyboard(classes):
     return make_keyboard(rows)
 
 
-def main_keyboard():
+def main_keyboard(_options):
     return make_keyboard(
         [
             [("Расписание", VkKeyboardColor.POSITIVE), ("Мой профиль", VkKeyboardColor.PRIMARY)],
             [("Начать заново", VkKeyboardColor.NEGATIVE)],
         ]
     )
+
+
+KEYBOARD_BUILDERS = {
+    KEYBOARD_ROLE: role_keyboard,
+    KEYBOARD_GRADE: grade_keyboard,
+    KEYBOARD_CLASS: class_keyboard,
+    KEYBOARD_MAIN: main_keyboard,
+}
+
+
+def build_keyboard(reply):
+    if not reply.keyboard:
+        return None
+    builder = KEYBOARD_BUILDERS.get(reply.keyboard)
+    if builder is None:
+        return None
+    return builder(reply.keyboard_options)
 
 
 def send(vk, peer_id, text, keyboard=None):
@@ -113,234 +124,8 @@ def send_long(vk, peer_id, text, keyboard=None, limit=3500):
         send(vk, peer_id, part, keyboard if index == len(parts) - 1 else None)
 
 
-def parse_role(text):
-    normalized = text.strip().lower()
-    if normalized in ("ученик", "школьник"):
-        return "student"
-    if normalized in ("родитель", "мама", "папа"):
-        return "parent"
-    if normalized in ("учитель", "преподаватель", "педагог"):
-        return "teacher"
-    return None
-
-
-def format_numbered(items):
-    return "\n".join(f"{index}. {item}" for index, item in enumerate(items, start=1))
-
-
-def parse_numbers(text, max_number):
-    numbers = set()
-    for chunk in text.replace(";", ",").split(","):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        if "-" in chunk:
-            left, right = chunk.split("-", 1)
-            if left.strip().isdigit() and right.strip().isdigit():
-                start, end = int(left), int(right)
-                numbers.update(range(min(start, end), max(start, end) + 1))
-            continue
-        if chunk.isdigit():
-            numbers.add(int(chunk))
-    return sorted(number for number in numbers if 1 <= number <= max_number)
-
-
-def ask_role(vk, peer_id):
-    send(
-        vk,
-        peer_id,
-        "Привет! Выберите роль: ученик, родитель или учитель.",
-        role_keyboard(),
-    )
-
-
-def ask_grade(vk, peer_id, schedule):
-    send(
-        vk,
-        peer_id,
-        "Выберите параллель класса.",
-        grade_keyboard(schedule.grades.keys()),
-    )
-
-
-def ask_teacher_subjects(vk, peer_id, schedule):
-    send(
-        vk,
-        peer_id,
-        "Выберите предметы, которые вы ведёте.\n"
-        "Напишите номера через запятую, например: 1, 4, 7.\n\n"
-        f"{format_numbered(schedule.subjects)}",
-    )
-
-
-def ask_teacher_classes(vk, peer_id, schedule):
-    send(
-        vk,
-        peer_id,
-        "Теперь выберите классы, в которых вы ведёте уроки.\n"
-        "Напишите номера через запятую, например: 2, 5, 9.\n\n"
-        f"{format_numbered(schedule.classes)}",
-    )
-
-
-def profile_text(profile):
-    role = ROLE_LABELS.get(profile.get("role"), "Не выбрана")
-    if profile.get("role") in ("student", "parent"):
-        return f"Ваш профиль:\nРоль: {role}\nКласс: {profile.get('class_name', 'не выбран')}"
-    if profile.get("role") == "teacher":
-        subjects = ", ".join(profile.get("subjects", [])) or "не выбраны"
-        classes = ", ".join(profile.get("classes", [])) or "не выбраны"
-        return f"Ваш профиль:\nРоль: {role}\nПредметы: {subjects}\nКлассы: {classes}"
-    return "Профиль пока не заполнен."
-
-
-def format_schedule(title, lessons, show_class=True):
-    if not lessons:
-        return f"{title}\n\nРасписание не найдено."
-
-    lines = [title]
-    current_day = None
-    for lesson in lessons:
-        if lesson.day != current_day:
-            current_day = lesson.day
-            lines.append("")
-            lines.append(current_day)
-        class_prefix = f"{lesson.class_name}: " if show_class and lesson.class_name else ""
-        lines.append(f"{lesson.time} - {class_prefix}{lesson.subject or '-'}")
-    return "\n".join(lines)
-
-
-def schedule_text(profile, schedule):
-    role = profile.get("role")
-    if role in ("student", "parent"):
-        class_name = profile.get("class_name")
-        if not class_name:
-            return "Сначала выберите класс через «Начать заново»."
-        lessons = schedule.lessons_for_class(class_name)
-        return format_schedule(f"Расписание для {class_name}", lessons, show_class=False)
-
-    if role == "teacher":
-        subjects = profile.get("subjects", [])
-        classes = profile.get("classes", [])
-        if not subjects or not classes:
-            return "Сначала выберите предметы и классы через «Начать заново»."
-        lessons = schedule.lessons_for_teacher(subjects, classes)
-        return format_schedule("Ваши уроки", lessons)
-
-    return "Сначала выберите роль через «Начать заново»."
-
-
-def send_profile_ready(vk, peer_id, profile, schedule):
-    send(
-        vk,
-        peer_id,
-        f"Готово, сохранил профиль.\n\n{profile_text(profile)}\n\n"
-        "Нажмите «Расписание», чтобы получить уроки.",
-        main_keyboard(),
-    )
-
-
-def handle_message(vk, storage, schedule, user_id, peer_id, text):
-    text = (text or "").strip()
-    user = storage.get_user(user_id)
-    text_lower = text.lower()
-
-    if not text or text_lower in ("/start", "start", "начать", "начать заново"):
-        storage.reset_user(user_id)
-        ask_role(vk, peer_id)
-        return
-
-    if text_lower == "мой профиль":
-        send(vk, peer_id, profile_text(user.get("profile", {})), main_keyboard())
-        return
-
-    if text_lower in ("расписание", "моё расписание", "мое расписание"):
-        send_long(vk, peer_id, schedule_text(user.get("profile", {}), schedule), main_keyboard())
-        return
-
-    if text_lower == "назад":
-        role = user.get("profile", {}).get("role")
-        if role in ("student", "parent"):
-            user["step"] = "grade"
-            storage.update_user(user_id, user)
-            ask_grade(vk, peer_id, schedule)
-            return
-
-    step = user.get("step", "role")
-    profile = user.setdefault("profile", {})
-
-    if step == "role":
-        role = parse_role(text)
-        if not role:
-            ask_role(vk, peer_id)
-            return
-        profile.clear()
-        profile["role"] = role
-        if role in ("student", "parent"):
-            user["step"] = "grade"
-            storage.update_user(user_id, user)
-            ask_grade(vk, peer_id, schedule)
-        else:
-            user["step"] = "teacher_subjects"
-            storage.update_user(user_id, user)
-            ask_teacher_subjects(vk, peer_id, schedule)
-        return
-
-    if step == "grade":
-        grade = "".join(ch for ch in text if ch.isdigit())
-        if grade not in schedule.grades:
-            ask_grade(vk, peer_id, schedule)
-            return
-        profile["grade"] = grade
-        user["step"] = "class_letter"
-        storage.update_user(user_id, user)
-        send(
-            vk,
-            peer_id,
-            "Выберите букву класса.",
-            class_keyboard(schedule.grades[grade]),
-        )
-        return
-
-    if step == "class_letter":
-        grade = profile.get("grade")
-        options = schedule.grades.get(grade, [])
-        normalized = text_lower.replace(" ", "")
-        selected = next((name for name in options if name.lower() == normalized), None)
-        if not selected and grade:
-            selected = next((name for name in options if name.lower().replace(grade, "") == normalized), None)
-        if not selected:
-            send(vk, peer_id, "Не нашёл такой класс. Выберите вариант из списка.", class_keyboard(options))
-            return
-        profile["class_name"] = selected
-        user["step"] = "done"
-        storage.update_user(user_id, user)
-        send_profile_ready(vk, peer_id, profile, schedule)
-        return
-
-    if step == "teacher_subjects":
-        numbers = parse_numbers(text, len(schedule.subjects))
-        if not numbers:
-            ask_teacher_subjects(vk, peer_id, schedule)
-            return
-        profile["subjects"] = [schedule.subjects[number - 1] for number in numbers]
-        user["step"] = "teacher_classes"
-        storage.update_user(user_id, user)
-        ask_teacher_classes(vk, peer_id, schedule)
-        return
-
-    if step == "teacher_classes":
-        numbers = parse_numbers(text, len(schedule.classes))
-        if not numbers:
-            ask_teacher_classes(vk, peer_id, schedule)
-            return
-        profile["classes"] = [schedule.classes[number - 1] for number in numbers]
-        user["step"] = "done"
-        storage.update_user(user_id, user)
-        send_profile_ready(vk, peer_id, profile, schedule)
-        return
-
-    send(vk, peer_id, "Нажмите «Расписание», чтобы получить уроки.", main_keyboard())
+def send_reply(vk, peer_id, reply):
+    send_long(vk, peer_id, reply.text, build_keyboard(reply))
 
 
 def get_message(event):
@@ -375,7 +160,8 @@ def run():
         user_id = message.get("from_id")
         text = message.get("text", "")
         if peer_id and user_id:
-            handle_message(vk, storage, schedule, user_id, peer_id, text)
+            reply = handle_message(storage, schedule, user_id, text)
+            send_reply(vk, peer_id, reply)
 
 
 if __name__ == "__main__":
